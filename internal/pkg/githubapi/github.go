@@ -1401,6 +1401,7 @@ func ApprovePr(approverClient *github.Client, ghPrClientDetails GhPrClientDetail
 }
 
 func GetInRepoConfig(ghPrClientDetails GhPrClientDetails, defaultBranch string) (*cfg.Config, error) {
+	ghPrClientDetails.PrLogger.Infof("Loading main telefonistka.yaml configuration from branch: %s", defaultBranch)
 	inRepoConfigFileContentString, _, err := GetFileContent(ghPrClientDetails, defaultBranch, "telefonistka.yaml")
 	if err != nil {
 		ghPrClientDetails.PrLogger.Errorf("Could not get in-repo configuration: err=%s\n", err)
@@ -1409,6 +1410,11 @@ func GetInRepoConfig(ghPrClientDetails GhPrClientDetails, defaultBranch string) 
 	c, err := cfg.ParseConfigFromYaml(inRepoConfigFileContentString)
 	if err != nil {
 		ghPrClientDetails.PrLogger.Errorf("Failed to parse configuration: err=%s\n", err)
+		return c, err
+	}
+	ghPrClientDetails.PrLogger.Infof("Successfully loaded main config with %d promotion paths", len(c.PromotionPaths))
+	for i, pp := range c.PromotionPaths {
+		ghPrClientDetails.PrLogger.Debugf("PromotionPath[%d]: sourcePath=%s, promotionPrs=%d", i, pp.SourcePath, len(pp.PromotionPrs))
 	}
 	return c, err
 }
