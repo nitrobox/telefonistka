@@ -97,27 +97,49 @@ func DetectDrift(ghPrClientDetails GhPrClientDetails) error {
 func getComponentConfig(ghPrClientDetails GhPrClientDetails, componentPath string, branch string) (*cfg.ComponentConfig, error) {
 	componentConfig := &cfg.ComponentConfig{}
 	rGetContentOps := &github.RepositoryContentGetOptions{Ref: branch}
-	ghPrClientDetails.PrLogger.Debugf("Loading component-level config from: %s/telefonistka.yaml (branch: %s)", componentPath, branch)
+	ghPrClientDetails.PrLogger.Infof("Finding ComponentConfig: path=%s/telefonistka.yaml, branch=%s", componentPath, branch)
+
 	componentConfigFileContent, _, resp, err := ghPrClientDetails.GhClientPair.v3Client.Repositories.GetContents(ghPrClientDetails.Ctx, ghPrClientDetails.Owner, ghPrClientDetails.Repo, componentPath+"/telefonistka.yaml", rGetContentOps)
 	prom.InstrumentGhCall(resp)
 	if (err != nil) && (resp.StatusCode != 404) { // The file is optional
-		ghPrClientDetails.PrLogger.Errorf("could not get file list from GH API: err=%s\nresponse=%v", err, resp)
+		ghPrClientDetails.PrLogger.Errorf("Failed to find ComponentConfig: err=%s, statusCode=%d, path=%s", err, resp.StatusCode, componentPath+"/telefonistka.yaml")
 		return nil, err
 	} else if resp.StatusCode == 404 {
-		ghPrClientDetails.PrLogger.Debugf("No in-component config found in %s (404)", componentPath)
+		ghPrClientDetails.PrLogger.Debugf("ComponentConfig not found (404) at %s/telefonistka.yaml - using empty defaults", componentPath)
 		return &cfg.ComponentConfig{}, nil
 	}
+
+	ghPrClientDetails.PrLogger.Debugf("Successfully found ComponentConfig file at %s/telefonistka.yaml (statusCode=200)", componentPath)
+
 	componentConfigFileContentString, _ := componentConfigFileContent.GetContent()
+	ghPrClientDetails.PrLogger.Debugf("Loaded ComponentConfig file content, size=%d bytes", len(componentConfigFileContentString))
+
 	err = yaml.Unmarshal([]byte(componentConfigFileContentString), componentConfig)
 	if err != nil {
-		ghPrClientDetails.PrLogger.Errorf("Failed to parse component configuration for %s: err=%s\n", componentPath, err) // TODO comment this error to PR
+		ghPrClientDetails.PrLogger.Errorf("Failed to parse ComponentConfig YAML for %s: err=%s\n", componentPath, err) // TODO comment this error to PR
 		return nil, err
 	}
-	if len(componentConfig.PromotionTargetBlockList) > 0 || len(componentConfig.PromotionTargetAllowList) > 0 {
-		ghPrClientDetails.PrLogger.Infof("Loaded component config for %s: blockList=%v, allowList=%v, disableArgoCDDiff=%v", componentPath, componentConfig.PromotionTargetBlockList, componentConfig.PromotionTargetAllowList, componentConfig.DisableArgoCDDiff)
+
+	ghPrClientDetails.PrLogger.Infof("Successfully parsed ComponentConfig for %s", componentPath)
+
+	// Log the applied configuration details
+	if len(componentConfig.PromotionTargetBlockList) > 0 || len(componentConfig.PromotionTargetAllowList) > 0 || componentConfig.DisableArgoCDDiff {
+		ghPrClientDetails.PrLogger.Infof("Applying ComponentConfig for %s: blockListPatterns=%d, allowListPatterns=%d, disableArgoCDDiff=%v",
+			componentPath,
+			len(componentConfig.PromotionTargetBlockList),
+			len(componentConfig.PromotionTargetAllowList),
+			componentConfig.DisableArgoCDDiff)
+
+		if len(componentConfig.PromotionTargetBlockList) > 0 {
+			ghPrClientDetails.PrLogger.Debugf("  BlockList patterns for %s: %v", componentPath, componentConfig.PromotionTargetBlockList)
+		}
+		if len(componentConfig.PromotionTargetAllowList) > 0 {
+			ghPrClientDetails.PrLogger.Debugf("  AllowList patterns for %s: %v", componentPath, componentConfig.PromotionTargetAllowList)
+		}
 	} else {
-		ghPrClientDetails.PrLogger.Debugf("Loaded component config for %s (no block/allow lists)", componentPath)
+		ghPrClientDetails.PrLogger.Debugf("ComponentConfig loaded for %s but has no filtering rules or ArgoCD settings", componentPath)
 	}
+
 	return componentConfig, nil
 }
 
@@ -261,17 +283,21 @@ func generatePlanBasedOnChangeddComponent(ghPrClientDetails GhPrClientDetails, c
 							if componentConfig.PromotionTargetBlockList != nil {
 								ghPrClientDetails.PrLogger.Debugf("Checking target '%s' against blockList: %v", indevidualPath, componentConfig.PromotionTargetBlockList)
 								if containMatchingRegex(componentConfig.PromotionTargetBlockList, indevidualPath) {
-									ghPrClientDetails.PrLogger.Warnf("Target '%s' blocked by blockList pattern for component %s", indevidualPath, componentToPromote.ComponentName)
+									ghPrClientDetails.PrLogger.Warnf("Target '%s' blocked by blockList pattern for component %s - promotion skipped for this target", indevidualPath, componentToPromote.ComponentName)
 									promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName] = append(promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName], indevidualPath)
 									continue
+								} else {
+									ghPrClientDetails.PrLogger.Debugf("Target '%s' passed blockList validation for component %s", indevidualPath, componentToPromote.ComponentName)
 								}
 							}
 							if componentConfig.PromotionTargetAllowList != nil {
 								ghPrClientDetails.PrLogger.Debugf("Checking target '%s' against allowList: %v", indevidualPath, componentConfig.PromotionTargetAllowList)
 								if !containMatchingRegex(componentConfig.PromotionTargetAllowList, indevidualPath) {
-									ghPrClientDetails.PrLogger.Warnf("Target '%s' not allowed by allowList pattern for component %s", indevidualPath, componentToPromote.ComponentName)
+									ghPrClientDetails.PrLogger.Warnf("Target '%s' not allowed by allowList pattern for component %s - promotion skipped for this target", indevidualPath, componentToPromote.ComponentName)
 									promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName] = append(promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName], indevidualPath)
 									continue
+								} else {
+									ghPrClientDetails.PrLogger.Debugf("Target '%s' passed allowList validation for component %s", indevidualPath, componentToPromote.ComponentName)
 								}
 							}
 						}

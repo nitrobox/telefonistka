@@ -207,6 +207,7 @@ func handleChangedPREvent(ctx context.Context, mainGithubClientPair GhClientPair
 
 		// Building a map component's path and a boolean value that indicates if we should diff it not.
 		// I'm avoiding doing this in the ArgoCD package to avoid circular dependencies and keep package scope clean
+		ghPrClientDetails.PrLogger.Infof("Processing %d changed components for ArgoCD diff filtering", len(componentPathList))
 		componentsToDiff := map[string]bool{}
 		for _, componentPath := range componentPathList {
 			c, err := getComponentConfig(ghPrClientDetails, componentPath, ghPrClientDetails.Ref)
@@ -216,7 +217,9 @@ func handleChangedPREvent(ctx context.Context, mainGithubClientPair GhClientPair
 			componentsToDiff[componentPath] = true
 			if c.DisableArgoCDDiff {
 				componentsToDiff[componentPath] = false
-				ghPrClientDetails.PrLogger.Debugf("ArgoCD diff disabled for %s\n", componentPath)
+				ghPrClientDetails.PrLogger.Warnf("ArgoCD diff disabled via ComponentConfig for component: %s", componentPath)
+			} else {
+				ghPrClientDetails.PrLogger.Debugf("ArgoCD diff enabled for component: %s (ComponentConfig allows it)", componentPath)
 			}
 		}
 		argoClients, err := argocd.CreateArgoCdClients()
