@@ -207,6 +207,7 @@ func handleChangedPREvent(ctx context.Context, mainGithubClientPair GhClientPair
 
 		// Building a map component's path and a boolean value that indicates if we should diff it not.
 		// I'm avoiding doing this in the ArgoCD package to avoid circular dependencies and keep package scope clean
+		ghPrClientDetails.PrLogger.Infof("Processing %d changed components for ArgoCD diff filtering", len(componentPathList))
 		componentsToDiff := map[string]bool{}
 		for _, componentPath := range componentPathList {
 			c, err := getComponentConfig(ghPrClientDetails, componentPath, ghPrClientDetails.Ref)
@@ -216,7 +217,9 @@ func handleChangedPREvent(ctx context.Context, mainGithubClientPair GhClientPair
 			componentsToDiff[componentPath] = true
 			if c.DisableArgoCDDiff {
 				componentsToDiff[componentPath] = false
-				ghPrClientDetails.PrLogger.Debugf("ArgoCD diff disabled for %s\n", componentPath)
+				ghPrClientDetails.PrLogger.Warnf("ArgoCD diff disabled via ComponentConfig for component: %s", componentPath)
+			} else {
+				ghPrClientDetails.PrLogger.Debugf("ArgoCD diff enabled for component: %s (ComponentConfig allows it)", componentPath)
 			}
 		}
 		argoClients, err := argocd.CreateArgoCdClients()
@@ -1401,6 +1404,7 @@ func ApprovePr(approverClient *github.Client, ghPrClientDetails GhPrClientDetail
 }
 
 func GetInRepoConfig(ghPrClientDetails GhPrClientDetails, defaultBranch string) (*cfg.Config, error) {
+	ghPrClientDetails.PrLogger.Infof("Loading main telefonistka.yaml configuration from branch: %s", defaultBranch)
 	inRepoConfigFileContentString, _, err := GetFileContent(ghPrClientDetails, defaultBranch, "telefonistka.yaml")
 	if err != nil {
 		ghPrClientDetails.PrLogger.Errorf("Could not get in-repo configuration: err=%s\n", err)
@@ -1409,6 +1413,11 @@ func GetInRepoConfig(ghPrClientDetails GhPrClientDetails, defaultBranch string) 
 	c, err := cfg.ParseConfigFromYaml(inRepoConfigFileContentString)
 	if err != nil {
 		ghPrClientDetails.PrLogger.Errorf("Failed to parse configuration: err=%s\n", err)
+		return c, err
+	}
+	ghPrClientDetails.PrLogger.Infof("Successfully loaded main config with %d promotion paths", len(c.PromotionPaths))
+	for i, pp := range c.PromotionPaths {
+		ghPrClientDetails.PrLogger.Debugf("PromotionPath[%d]: sourcePath=%s, promotionPrs=%d", i, pp.SourcePath, len(pp.PromotionPrs))
 	}
 	return c, err
 }

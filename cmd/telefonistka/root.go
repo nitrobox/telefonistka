@@ -20,7 +20,7 @@ see https://github.com/commercetools/telefonistka`,
 }
 
 func Execute() {
-	switch getEnv("LOG_LEVEL", "info") {
+	switch getEnv("LOG_LEVEL", "debug") {
 	case "debug":
 		log.SetLevel(log.DebugLevel)
 		log.SetReportCaller(true)

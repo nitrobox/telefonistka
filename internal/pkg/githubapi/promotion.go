@@ -97,21 +97,49 @@ func DetectDrift(ghPrClientDetails GhPrClientDetails) error {
 func getComponentConfig(ghPrClientDetails GhPrClientDetails, componentPath string, branch string) (*cfg.ComponentConfig, error) {
 	componentConfig := &cfg.ComponentConfig{}
 	rGetContentOps := &github.RepositoryContentGetOptions{Ref: branch}
+	ghPrClientDetails.PrLogger.Infof("Finding ComponentConfig: path=%s/telefonistka.yaml, branch=%s", componentPath, branch)
+
 	componentConfigFileContent, _, resp, err := ghPrClientDetails.GhClientPair.v3Client.Repositories.GetContents(ghPrClientDetails.Ctx, ghPrClientDetails.Owner, ghPrClientDetails.Repo, componentPath+"/telefonistka.yaml", rGetContentOps)
 	prom.InstrumentGhCall(resp)
 	if (err != nil) && (resp.StatusCode != 404) { // The file is optional
-		ghPrClientDetails.PrLogger.Errorf("could not get file list from GH API: err=%s\nresponse=%v", err, resp)
+		ghPrClientDetails.PrLogger.Errorf("Failed to find ComponentConfig: err=%s, statusCode=%d, path=%s", err, resp.StatusCode, componentPath+"/telefonistka.yaml")
 		return nil, err
 	} else if resp.StatusCode == 404 {
-		ghPrClientDetails.PrLogger.Debugf("No in-component config in %s", componentPath)
+		ghPrClientDetails.PrLogger.Debugf("ComponentConfig not found (404) at %s/telefonistka.yaml - using empty defaults", componentPath)
 		return &cfg.ComponentConfig{}, nil
 	}
+
+	ghPrClientDetails.PrLogger.Debugf("Successfully found ComponentConfig file at %s/telefonistka.yaml (statusCode=200)", componentPath)
+
 	componentConfigFileContentString, _ := componentConfigFileContent.GetContent()
+	ghPrClientDetails.PrLogger.Debugf("Loaded ComponentConfig file content, size=%d bytes", len(componentConfigFileContentString))
+
 	err = yaml.Unmarshal([]byte(componentConfigFileContentString), componentConfig)
 	if err != nil {
-		ghPrClientDetails.PrLogger.Errorf("Failed to parse configuration: err=%s\n", err) // TODO comment this error to PR
+		ghPrClientDetails.PrLogger.Errorf("Failed to parse ComponentConfig YAML for %s: err=%s\n", componentPath, err) // TODO comment this error to PR
 		return nil, err
 	}
+
+	ghPrClientDetails.PrLogger.Infof("Successfully parsed ComponentConfig for %s", componentPath)
+
+	// Log the applied configuration details
+	if len(componentConfig.PromotionTargetBlockList) > 0 || len(componentConfig.PromotionTargetAllowList) > 0 || componentConfig.DisableArgoCDDiff {
+		ghPrClientDetails.PrLogger.Infof("Applying ComponentConfig for %s: blockListPatterns=%d, allowListPatterns=%d, disableArgoCDDiff=%v",
+			componentPath,
+			len(componentConfig.PromotionTargetBlockList),
+			len(componentConfig.PromotionTargetAllowList),
+			componentConfig.DisableArgoCDDiff)
+
+		if len(componentConfig.PromotionTargetBlockList) > 0 {
+			ghPrClientDetails.PrLogger.Debugf("  BlockList patterns for %s: %v", componentPath, componentConfig.PromotionTargetBlockList)
+		}
+		if len(componentConfig.PromotionTargetAllowList) > 0 {
+			ghPrClientDetails.PrLogger.Debugf("  AllowList patterns for %s: %v", componentPath, componentConfig.PromotionTargetAllowList)
+		}
+	} else {
+		ghPrClientDetails.PrLogger.Debugf("ComponentConfig loaded for %s but has no filtering rules or ArgoCD settings", componentPath)
+	}
+
 	return componentConfig, nil
 }
 
@@ -192,35 +220,43 @@ func generateListOfChangedComponentPaths(ghPrClientDetails GhPrClientDetails, co
 
 // This function generates a promotion plan based on the list of relevant components that where "touched" and the in-repo telefonitka  configuration
 func generatePlanBasedOnChangeddComponent(ghPrClientDetails GhPrClientDetails, config *cfg.Config, relevantComponents map[relevantComponent]struct{}, configBranch string) (promotions map[string]PromotionInstance, err error) {
+	ghPrClientDetails.PrLogger.Infof("Starting promotion plan generation for %d relevant components", len(relevantComponents))
 	promotions = make(map[string]PromotionInstance)
 	for componentToPromote := range relevantComponents {
+		ghPrClientDetails.PrLogger.Debugf("Processing component: sourcePath=%s, componentName=%s, autoMerge=%v", componentToPromote.SourcePath, componentToPromote.ComponentName, componentToPromote.AutoMerge)
 		componentConfig, err := getComponentConfig(ghPrClientDetails, componentToPromote.SourcePath+componentToPromote.ComponentName, configBranch)
 		if err != nil {
 			ghPrClientDetails.PrLogger.Errorf("Failed to get in component configuration, err=%s\nskipping %s", err, componentToPromote.SourcePath+componentToPromote.ComponentName)
+			continue
 		}
 
 		for _, configPromotionPath := range config.PromotionPaths {
 			if match, _ := regexp.MatchString(configPromotionPath.SourcePath, componentToPromote.SourcePath); match {
+				ghPrClientDetails.PrLogger.Debugf("Component %s matches promotionPath sourcePath: %s", componentToPromote.ComponentName, configPromotionPath.SourcePath)
 				// This section checks if a PromotionPath has a condition and skips it if needed
 				if configPromotionPath.Conditions.PrHasLabels != nil {
+					ghPrClientDetails.PrLogger.Debugf("PromotionPath has label conditions: %v", configPromotionPath.Conditions.PrHasLabels)
 					thisPrHasTheRightLabel := false
 					for _, l := range ghPrClientDetails.Labels {
 						if contains(configPromotionPath.Conditions.PrHasLabels, *l.Name) {
+							ghPrClientDetails.PrLogger.Debugf("PR label '%s' matches condition", *l.Name)
 							thisPrHasTheRightLabel = true
 							break
 						}
 					}
 					if !thisPrHasTheRightLabel {
+						ghPrClientDetails.PrLogger.Debugf("PR labels don't match condition, skipping promotionPath: %s", configPromotionPath.SourcePath)
 						continue
 					}
 				}
 
 				for _, ppr := range configPromotionPath.PromotionPrs {
 					sort.Strings(ppr.TargetPaths)
+					ghPrClientDetails.PrLogger.Debugf("Processing PromotionPr with targetPaths: %v, targetDescription: %s", ppr.TargetPaths, ppr.TargetDescription)
 
 					mapKey := configPromotionPath.SourcePath + ">" + strings.Join(ppr.TargetPaths, "|") // This key is used to aggregate the PR based on source and target combination
 					if entry, ok := promotions[mapKey]; !ok {
-						ghPrClientDetails.PrLogger.Debugf("Adding key %s", mapKey)
+						ghPrClientDetails.PrLogger.Infof("Creating new promotion: %s", mapKey)
 						if ppr.TargetDescription == "" {
 							ppr.TargetDescription = strings.Join(ppr.TargetPaths, " ")
 						}
@@ -245,24 +281,37 @@ func generatePlanBasedOnChangeddComponent(ghPrClientDetails GhPrClientDetails, c
 						if componentConfig != nil {
 							// BlockList supersedes Allowlist, if something matched there the entry is ignored regardless of allowlist
 							if componentConfig.PromotionTargetBlockList != nil {
+								ghPrClientDetails.PrLogger.Debugf("Checking target '%s' against blockList: %v", indevidualPath, componentConfig.PromotionTargetBlockList)
 								if containMatchingRegex(componentConfig.PromotionTargetBlockList, indevidualPath) {
+									ghPrClientDetails.PrLogger.Warnf("Target '%s' blocked by blockList pattern for component %s - promotion skipped for this target", indevidualPath, componentToPromote.ComponentName)
 									promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName] = append(promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName], indevidualPath)
 									continue
+								} else {
+									ghPrClientDetails.PrLogger.Debugf("Target '%s' passed blockList validation for component %s", indevidualPath, componentToPromote.ComponentName)
 								}
 							}
 							if componentConfig.PromotionTargetAllowList != nil {
+								ghPrClientDetails.PrLogger.Debugf("Checking target '%s' against allowList: %v", indevidualPath, componentConfig.PromotionTargetAllowList)
 								if !containMatchingRegex(componentConfig.PromotionTargetAllowList, indevidualPath) {
+									ghPrClientDetails.PrLogger.Warnf("Target '%s' not allowed by allowList pattern for component %s - promotion skipped for this target", indevidualPath, componentToPromote.ComponentName)
 									promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName] = append(promotions[mapKey].Metadata.PerComponentSkippedTargetPaths[componentToPromote.ComponentName], indevidualPath)
 									continue
+								} else {
+									ghPrClientDetails.PrLogger.Debugf("Target '%s' passed allowList validation for component %s", indevidualPath, componentToPromote.ComponentName)
 								}
 							}
 						}
+						ghPrClientDetails.PrLogger.Debugf("Adding sync path for promotion: target=%s, source=%s", indevidualPath+componentToPromote.ComponentName, componentToPromote.SourcePath+componentToPromote.ComponentName)
 						promotions[mapKey].ComputedSyncPaths[indevidualPath+componentToPromote.ComponentName] = componentToPromote.SourcePath + componentToPromote.ComponentName
 					}
 				}
 				break
 			}
 		}
+	}
+	ghPrClientDetails.PrLogger.Infof("Promotion plan generation complete: %d promotion instances created", len(promotions))
+	for key, promotion := range promotions {
+		ghPrClientDetails.PrLogger.Debugf("Promotion %s: %d sync paths, %d components", key, len(promotion.ComputedSyncPaths), len(promotion.Metadata.ComponentNames))
 	}
 	return promotions, nil
 }
