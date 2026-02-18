@@ -4,6 +4,7 @@ import (
 	"testing"
 )
 
+//nolint:paralleltest // t.Setenv is used in subtests, which is not compatible with t.Parallel
 func TestGetEnvInt(t *testing.T) {
 	const envKey = "TEST_ENV_INT"
 
