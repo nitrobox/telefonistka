@@ -7,6 +7,7 @@ import (
 
 	"github.com/alexliesenfeld/health"
 	"github.com/commercetools/telefonistka/internal/pkg/githubapi"
+	"github.com/commercetools/telefonistka/internal/pkg/utils"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
@@ -22,23 +23,24 @@ func getCrucialEnv(key string) string {
 	return ""
 }
 
-var serveCmd = &cobra.Command{
-	Use:   "server",
-	Short: "Runs the web server that listens to GitHub webhooks",
-	Args:  cobra.ExactArgs(0),
-	Run: func(cmd *cobra.Command, args []string) {
-		serve()
-	},
-}
-
 // This is still(https://github.com/spf13/cobra/issues/1862) the documented way to use cobra
 func init() { //nolint:gochecknoinits
+	var eventTimeout int
+	serveCmd := &cobra.Command{
+		Use:   "server",
+		Short: "Runs the web server that listens to GitHub webhooks",
+		Args:  cobra.ExactArgs(0),
+		Run: func(cmd *cobra.Command, args []string) {
+			serve(eventTimeout)
+		},
+	}
+	serveCmd.Flags().IntVarP(&eventTimeout, "timeout", "e", utils.GetEnvInt("GITHUB_EVENT_TIMEOUT", 5), "Timeout in minutes for handling the event, defaults to 5 minutes")
 	rootCmd.AddCommand(serveCmd)
 }
 
-func handleWebhook(githubWebhookSecret []byte, mainGhClientCache *lru.Cache[string, githubapi.GhClientPair], prApproverGhClientCache *lru.Cache[string, githubapi.GhClientPair]) func(http.ResponseWriter, *http.Request) {
+func handleWebhook(githubWebhookSecret []byte, mainGhClientCache *lru.Cache[string, githubapi.GhClientPair], prApproverGhClientCache *lru.Cache[string, githubapi.GhClientPair], eventTimeout int) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := githubapi.ReciveWebhook(r, mainGhClientCache, prApproverGhClientCache, githubWebhookSecret)
+		err := githubapi.ReciveWebhook(r, mainGhClientCache, prApproverGhClientCache, githubWebhookSecret, eventTimeout)
 		if err != nil {
 			log.Errorf("error handling webhook: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -48,7 +50,7 @@ func handleWebhook(githubWebhookSecret []byte, mainGhClientCache *lru.Cache[stri
 	}
 }
 
-func serve() {
+func serve(eventTimeout int) {
 	githubWebhookSecret := []byte(getCrucialEnv("GITHUB_WEBHOOK_SECRET"))
 	livenessChecker := health.NewChecker() // No checks for the moment, other then the http server availability
 	readinessChecker := health.NewChecker()
@@ -60,7 +62,7 @@ func serve() {
 	go githubapi.MainGhMetricsLoop(mainGhClientCache)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook", handleWebhook(githubWebhookSecret, mainGhClientCache, prApproverGhClientCache))
+	mux.HandleFunc("/webhook", handleWebhook(githubWebhookSecret, mainGhClientCache, prApproverGhClientCache, eventTimeout))
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/live", health.NewHandler(livenessChecker))
 	mux.Handle("/ready", health.NewHandler(readinessChecker))
