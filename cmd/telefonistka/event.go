@@ -1,7 +1,6 @@
 package telefonistka
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/commercetools/telefonistka/internal/pkg/githubapi"
@@ -9,15 +8,6 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/spf13/cobra"
 )
-
-type ConversionError struct {
-	env string
-	key string
-}
-
-func (e *ConversionError) Error() string {
-	return fmt.Sprintf("Invalid integer value for %s: %s.", e.env, e.key)
-}
 
 // This is still(https://github.com/spf13/cobra/issues/1862) the documented way to use cobra
 func init() { //nolint:gochecknoinits
